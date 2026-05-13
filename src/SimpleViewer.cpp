@@ -37,7 +37,7 @@ void SimpleViewer::glutKeyboard(unsigned char key, int x, int y)
     SimpleViewer::m_self->onKey(key, x, y);
 }
 
-SimpleViewer::SimpleViewer(const char* strSampleName, openni::Device &device, openni::VideoStream& color, openni::VideoStream& depth, openni::VideoStream& ir) :
+SimpleViewer::SimpleViewer(const char* strSampleName, openni::Device &device, openni::VideoStream& color, openni::VideoStream& ir, openni::VideoStream& depth) :
 m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_pTexMap(NULL), m_streamType(STREAM_TYPE_UNKNOWN), m_prevStreamType(STREAM_TYPE_UNKNOWN)
 {
     m_self = this;
