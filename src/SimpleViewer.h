@@ -139,6 +139,11 @@ private:
    int   m_validPixelCount; ///< Count of pixels within the target depth range
    int   m_minX, m_maxX, m_minY, m_maxY; ///< Bounding box of the detected user
 
+   /// Exponential moving average of valid pixel count.
+   /// Used to detect DUCK: when hands drop out of camera view, pixel count
+   /// falls well below this baseline.
+   float m_avgPixelCount;
+
    // --- State Debouncing (Frame counters) ---
    int   m_framesJump;
    int   m_framesDuck;
