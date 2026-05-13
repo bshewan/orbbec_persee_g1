@@ -198,12 +198,15 @@ void SimpleViewer::loadCOLORFrame(VideoFrameRef frame)
  * Logic:
  * 1. Filter: Isolate pixels between 800mm and 2000mm (the "user zone").
  * 2. Segmentation: Calculate the bounding box and Center of Mass (CoM).
- * 3. Vertical Zone Analysis: Divide the user's arm area (outer 25% width) into 
- *    Top, Mid, and Bottom vertical zones.
- * 4. Classification: 
- *    - Arms in Top Zone -> JUMP (High Arms)
- *    - Arms in Bottom Zone -> DUCK (Low Arms)
- *    - Arms in Mid Zone -> WALKING (Normal state)
+ * 3. Vertical Zone Analysis:
+ *    - topZoneCount: pixels in the outer 35% of width AND top 30% of height,
+ *      OR any pixel in the topmost 12% of height (catches arms raised straight up).
+ *    - midZoneCount: pixels in the outer 35% of width AND middle 30-70% of height.
+ *    - botZoneCount: pixels in the outer 35% of width AND bottom 70-100% of height.
+ * 4. Classification:
+ *    - topZoneCount dominant -> JUMP (arms raised above head)
+ *    - botZoneCount dominant -> DUCK (arms lowered / crouching)
+ *    - midZoneCount dominant -> WALKING (arms at sides)
  * 5. Debouncing: Requires 5 consecutive frames in a state to trigger an action.
  */
 void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
@@ -261,6 +264,14 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         int midZoneCount = 0;
         int botZoneCount = 0;
 
+        // Outer 35% of bounding box width on each side (widened from 25% to
+        // catch arms raised diagonally or partially to the sides).
+        const float ARM_ZONE = 0.35f;
+        // Top band: topmost 12% of bounding box height counts at any X position,
+        // so hands raised straight above the head are always captured even when
+        // they fall inside the body's horizontal extent.
+        const float TOP_BAND = 0.12f;
+
         pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
         for (int y = m_minY; y <= m_maxY; ++y)
         {
@@ -271,13 +282,15 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
                 const DepthPixel p = pDepthRow[x];
                 if (p >= MIN_DIST && p <= MAX_DIST)
                 {
-                    // Look only at the sides of the person (the arms)
-                    if (x < m_minX + (userWidth * 0.25) || x > m_maxX - (userWidth * 0.25))
-                    {
-                        if (heightPercent < 0.3f) topZoneCount++;
-                        else if (heightPercent < 0.7f) midZoneCount++;
-                        else botZoneCount++;
-                    }
+                    bool isSideArm = (x < m_minX + (userWidth * ARM_ZONE) || x > m_maxX - (userWidth * ARM_ZONE));
+                    bool isTopBand = (heightPercent < TOP_BAND);
+
+                    if (heightPercent < 0.30f && (isSideArm || isTopBand))
+                        topZoneCount++;
+                    else if (heightPercent < 0.70f && isSideArm)
+                        midZoneCount++;
+                    else if (isSideArm)
+                        botZoneCount++;
                 }
             }
             pDepthRow += rowSize;
