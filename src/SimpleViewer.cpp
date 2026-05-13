@@ -208,7 +208,7 @@ void SimpleViewer::loadCOLORFrame(VideoFrameRef frame)
  */
 void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
 {
-    if (!frame.isValid() || frame.getVideoMode().getPixelFormat() != PIXEL_FORMAT_DEPTH_1MM)
+    if (!frame.isValid() || frame.getVideoMode().getPixelFormat() != openni::PIXEL_FORMAT_DEPTH_1_MM)
     {
         return;
     }
@@ -303,9 +303,9 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
             m_framesDuck = 0;
         }
 
-        if (m_framesJump == 5) m_gestureText = "JUMP";
-        else if (m_framesDuck == 5) m_gestureText = "DUCK";
-        else if (m_framesWalk == 5) m_gestureText = "WALKING";
+        if (m_framesJump >= 5) m_gestureText = "JUMP";
+        else if (m_framesDuck >= 5) m_gestureText = "DUCK";
+        else if (m_framesWalk >= 5) m_gestureText = "WALKING";
     }
     else
     {
@@ -345,8 +345,10 @@ void SimpleViewer::switchStream()
         VideoMode videomode = active->getVideoMode();
         videomode.setResolution(640, 480);
         
-        if (m_streamType == STREAM_TYPE_IR_VGA) 
+        if (m_streamType == STREAM_TYPE_IR_VGA)
             videomode.setPixelFormat(openni::PIXEL_FORMAT_GRAY16);
+        else if (m_streamType == STREAM_TYPE_DEPTH_VGA)
+            videomode.setPixelFormat(openni::PIXEL_FORMAT_DEPTH_1_MM);
         
         active->setVideoMode(videomode);
         active->start();
@@ -624,7 +626,7 @@ void SimpleViewer::calculateHistogram(float* pHistogram, int histogramSize, cons
     {
         for (int i=1; i<histogramSize; i++)
         {
-            pHistogram[i] = (256 * (1.0f - (pHistogram[i] / nNumberOfPoints)));
+            pHistogram[i] = (255 * (1.0f - (pHistogram[i] / nNumberOfPoints)));
         }
     }
 }
