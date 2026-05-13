@@ -47,6 +47,7 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_framesJump = 0;
     m_framesDuck = 0;
     m_framesWalk = 0;
+    m_avgPixelCount = 0.0f;
     m_gestureText = "WAITING";
 }
 
@@ -194,41 +195,41 @@ void SimpleViewer::loadCOLORFrame(VideoFrameRef frame)
 
 /**
  * @brief Heuristic-based analysis to detect human gestures.
- * 
+ *
+ * Camera setup: the sensor is mounted close enough that only the upper body
+ * is visible — roughly from the elbows upward.
+ *
  * Logic:
- * 1. Filter: Isolate pixels between 800mm and 2000mm (the "user zone").
- * 2. Segmentation: Calculate the bounding box and Center of Mass (CoM).
- * 3. Vertical Zone Analysis:
- *    - topZoneCount: pixels in the outer 35% of width AND top 30% of height,
- *      OR any pixel in the topmost 12% of height (catches arms raised straight up).
- *    - midZoneCount: pixels in the outer 35% of width AND middle 30-70% of height.
- *    - botZoneCount: pixels in the outer 35% of width AND bottom 70-100% of height.
- * 4. Classification:
- *    - topZoneCount dominant -> JUMP (arms raised above head)
- *    - botZoneCount dominant -> DUCK (arms lowered / crouching)
- *    - midZoneCount dominant -> WALKING (arms at sides)
- * 5. Debouncing: Requires 5 consecutive frames in a state to trigger an action.
+ * 1. Filter: isolate pixels in 800–2000 mm (user zone).
+ * 2. Segmentation: bounding box + total valid pixel count.
+ * 3. DUCK detection (priority check):
+ *    When the user ducks, the forearms/hands drop below the camera's field
+ *    of view. The total visible pixel count falls sharply below the recent
+ *    exponential moving average (EMA). Threshold: current < EMA × 0.60.
+ * 4. JUMP vs WALK via vertical pixel distribution:
+ *    - WALKING: arms bent 90°, forearms point toward camera at elbow height
+ *      (bottom of frame) → more pixels in the LOWER half of the bounding box.
+ *    - JUMP: arms raised above head → pixels shift to the UPPER half.
+ *    Threshold: topHalfCount > botHalfCount × 1.8 → JUMP, else WALK.
+ * 5. Debouncing: 5 consecutive frames required before a gesture fires.
  */
 void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
 {
     if (!frame.isValid() || frame.getVideoMode().getPixelFormat() != openni::PIXEL_FORMAT_DEPTH_1_MM)
-    {
         return;
-    }
 
     const DepthPixel* pDepthRow = (const DepthPixel*)frame.getData();
     int rowSize = frame.getStrideInBytes() / sizeof(DepthPixel);
 
-    long long sumX = 0;
-    long long sumY = 0;
+    long long sumX = 0, sumY = 0;
     m_validPixelCount = 0;
-    m_minX = frame.getWidth(); m_maxX = 0;
+    m_minX = frame.getWidth();  m_maxX = 0;
     m_minY = frame.getHeight(); m_maxY = 0;
 
-    // Phase 1: Background subtraction (Distance filtering)
     const int MIN_DIST = 800;
     const int MAX_DIST = 2000;
 
+    // Phase 1: Background subtraction + bounding box
     for (int y = 0; y < frame.getHeight(); ++y)
     {
         const DepthPixel* pDepth = pDepthRow;
@@ -236,10 +237,8 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         {
             if (*pDepth >= MIN_DIST && *pDepth <= MAX_DIST)
             {
-                sumX += x;
-                sumY += y;
+                sumX += x; sumY += y;
                 m_validPixelCount++;
-
                 if (x < m_minX) m_minX = x;
                 if (x > m_maxX) m_maxX = x;
                 if (y < m_minY) m_minY = y;
@@ -249,61 +248,21 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         pDepthRow += rowSize;
     }
 
-    // Phase 2: Analyze vertical zones if enough pixels represent a person
-    if (m_validPixelCount > 1000) 
+    if (m_validPixelCount > 1000)
     {
         m_userCoMX = (float)sumX / m_validPixelCount;
         m_userCoMY = (float)sumY / m_validPixelCount;
 
-        int userWidth = m_maxX - m_minX;
+        int userWidth  = m_maxX - m_minX;
         int userHeight = m_maxY - m_minY;
-        
         if (userHeight == 0 || userWidth == 0) return;
 
-        int topZoneCount = 0;
-        int midZoneCount = 0;
-        int botZoneCount = 0;
+        // Update EMA pixel count (converges over ~20 frames).
+        m_avgPixelCount = m_avgPixelCount * 0.95f + (float)m_validPixelCount * 0.05f;
 
-        // Outer 35% of bounding box width on each side (widened from 25% to
-        // catch arms raised diagonally or partially to the sides).
-        const float ARM_ZONE = 0.35f;
-        // Top band: topmost 12% of bounding box height counts at any X position,
-        // so hands raised straight above the head are always captured even when
-        // they fall inside the body's horizontal extent.
-        const float TOP_BAND = 0.12f;
-
-        pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
-        for (int y = m_minY; y <= m_maxY; ++y)
-        {
-            float heightPercent = (float)(y - m_minY) / userHeight;
-            
-            for (int x = m_minX; x <= m_maxX; ++x)
-            {
-                const DepthPixel p = pDepthRow[x];
-                if (p >= MIN_DIST && p <= MAX_DIST)
-                {
-                    bool isSideArm = (x < m_minX + (userWidth * ARM_ZONE) || x > m_maxX - (userWidth * ARM_ZONE));
-                    bool isTopBand = (heightPercent < TOP_BAND);
-
-                    if (heightPercent < 0.30f && (isSideArm || isTopBand))
-                        topZoneCount++;
-                    else if (heightPercent < 0.70f && isSideArm)
-                        midZoneCount++;
-                    else if (isSideArm)
-                        botZoneCount++;
-                }
-            }
-            pDepthRow += rowSize;
-        }
-
-        // Phase 3: Classification and Debouncing
-        if (topZoneCount > midZoneCount && topZoneCount > botZoneCount)
-        {
-            m_framesJump++;
-            m_framesDuck = 0;
-            m_framesWalk = 0;
-        }
-        else if (botZoneCount > midZoneCount && botZoneCount > topZoneCount)
+        // Phase 2a: DUCK — forearms/hands have dropped below the camera view.
+        // Require the EMA to be established (> 5000) before using it.
+        if (m_avgPixelCount > 5000.0f && (float)m_validPixelCount < m_avgPixelCount * 0.60f)
         {
             m_framesDuck++;
             m_framesJump = 0;
@@ -311,9 +270,38 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         }
         else
         {
-            m_framesWalk++;
-            m_framesJump = 0;
-            m_framesDuck = 0;
+            // Phase 2b: JUMP vs WALK — compare top-half vs bottom-half density.
+            int topHalfCount = 0;
+            int botHalfCount = 0;
+
+            pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
+            for (int y = m_minY; y <= m_maxY; ++y)
+            {
+                float heightPercent = (float)(y - m_minY) / userHeight;
+                for (int x = m_minX; x <= m_maxX; ++x)
+                {
+                    const DepthPixel p = pDepthRow[x];
+                    if (p >= MIN_DIST && p <= MAX_DIST)
+                    {
+                        if (heightPercent < 0.50f) topHalfCount++;
+                        else                       botHalfCount++;
+                    }
+                }
+                pDepthRow += rowSize;
+            }
+
+            if (topHalfCount > botHalfCount * 1.8f)
+            {
+                m_framesJump++;
+                m_framesDuck = 0;
+                m_framesWalk = 0;
+            }
+            else
+            {
+                m_framesWalk++;
+                m_framesJump = 0;
+                m_framesDuck = 0;
+            }
         }
 
         if (m_framesJump >= 5) m_gestureText = "JUMP";
@@ -323,6 +311,7 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
     else
     {
         m_gestureText = "NO USER";
+        m_avgPixelCount = 0.0f; // Reset EMA so it re-calibrates when user returns
     }
 }
 
