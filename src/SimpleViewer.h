@@ -144,6 +144,10 @@ private:
    /// falls well below this baseline.
    float m_avgPixelCount;
 
+   /// Last-frame top/bottom half pixel counts (stored for debug overlay).
+   int m_topHalfCount;
+   int m_botHalfCount;
+
    // --- State Debouncing (Frame counters) ---
    int   m_framesJump;
    int   m_framesDuck;

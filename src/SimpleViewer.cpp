@@ -48,6 +48,8 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_framesDuck = 0;
     m_framesWalk = 0;
     m_avgPixelCount = 0.0f;
+    m_topHalfCount  = 0;
+    m_botHalfCount  = 0;
     m_gestureText = "WAITING";
 }
 
@@ -273,7 +275,6 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
             // Phase 2b: JUMP vs WALK — compare top-half vs bottom-half density.
             int topHalfCount = 0;
             int botHalfCount = 0;
-
             pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
             for (int y = m_minY; y <= m_maxY; ++y)
             {
@@ -289,6 +290,9 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
                 }
                 pDepthRow += rowSize;
             }
+
+            m_topHalfCount = topHalfCount;
+            m_botHalfCount = botHalfCount;
 
             if (topHalfCount > botHalfCount * 1.8f)
             {
@@ -431,24 +435,53 @@ void SimpleViewer::drawText(int x, int y, const char* text)
 }
 
 /**
- * @brief Renders the "ACTION: [GESTURE]" HUD in the top-left corner.
+ * @brief Renders the gesture HUD and live detection values for tuning.
+ *
+ * Layout (top-left):
+ *   ACTION: <gesture>
+ *   Px: <current>  EMA: <avg>  ratio: <duck_ratio>  [threshold 0.60]
+ *   Top: <top>  Bot: <bot>  ratio: <jump_ratio>  [threshold 1.80]
  */
 void SimpleViewer::renderGestureOverlay()
 {
     glDisable(GL_TEXTURE_2D);
-    
-    // Background box
+
+    // --- Background box ---
     glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
     glBegin(GL_QUADS);
     glVertex2i(10, 10);
-    glVertex2i(250, 10);
-    glVertex2i(250, 50);
-    glVertex2i(10, 50);
+    glVertex2i(460, 10);
+    glVertex2i(460, 100);
+    glVertex2i(10, 100);
     glEnd();
 
-    // Gesture text
-    glColor3f(0.0f, 1.0f, 0.0f); 
-    drawText(20, 35, ("ACTION: " + m_gestureText).c_str());
+    char buf[128];
+
+    // Row 1: gesture label
+    glColor3f(0.0f, 1.0f, 0.0f);
+    drawText(20, 32, ("ACTION: " + m_gestureText).c_str());
+
+    // Row 2: duck detection values
+    float duckRatio = (m_avgPixelCount > 0.0f)
+                      ? (float)m_validPixelCount / m_avgPixelCount
+                      : 0.0f;
+    snprintf(buf, sizeof(buf), "Px: %5d  EMA: %5d  duck_ratio: %.2f  [thresh 0.60]",
+             m_validPixelCount,
+             (int)m_avgPixelCount,
+             duckRatio);
+    glColor3f(1.0f, 1.0f, 0.0f);
+    drawText(20, 57, buf);
+
+    // Row 3: jump/walk detection values
+    float jumpRatio = (m_botHalfCount > 0)
+                      ? (float)m_topHalfCount / (float)m_botHalfCount
+                      : 0.0f;
+    snprintf(buf, sizeof(buf), "Top: %5d  Bot: %5d  jump_ratio: %.2f  [thresh 1.80]",
+             m_topHalfCount,
+             m_botHalfCount,
+             jumpRatio);
+    glColor3f(0.4f, 0.8f, 1.0f);
+    drawText(20, 82, buf);
 
     glEnable(GL_TEXTURE_2D);
 }
