@@ -13,7 +13,7 @@
 // Treadmill user sits approximately 800-1000 mm from the sensor.
 // 600 mm near-limit gives margin for arms reaching toward the camera;
 // 1200 mm far-limit excludes background while still covering the full body depth.
-#define GESTURE_MIN_DIST   600
+#define GESTURE_MIN_DIST   400
 #define GESTURE_MAX_DIST   1200
 
 /**
