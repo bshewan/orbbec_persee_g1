@@ -9,6 +9,13 @@
 #define GL_WIN_SIZE_Y      600
 #define TEXTURE_SIZE       512
 
+// Gesture detection depth range (mm).
+// Treadmill user sits approximately 800-1000 mm from the sensor.
+// 600 mm near-limit gives margin for arms reaching toward the camera;
+// 1200 mm far-limit excludes background while still covering the full body depth.
+#define GESTURE_MIN_DIST   600
+#define GESTURE_MAX_DIST   1200
+
 /**
  * @brief Helpers to ensure texture dimensions are powers of 2 (required for some OpenGL versions).
  */
@@ -148,9 +155,6 @@ void SimpleViewer::loadDepthFrame(VideoFrameRef frame)
 {
     calculateHistogram(m_pDepthHist, MAX_DEPTH, frame);
 
-    const int GESTURE_MIN_DIST = 800;
-    const int GESTURE_MAX_DIST = 2000;
-
     const DepthPixel* pDepthRow = (const DepthPixel*)frame.getData();
     RGB888Pixel* pTexRow = m_pTexMap + frame.getCropOriginY() * m_nTexMapX;
     int rowSize = frame.getStrideInBytes() / sizeof(DepthPixel);
@@ -234,8 +238,8 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
     m_minX = frame.getWidth();  m_maxX = 0;
     m_minY = frame.getHeight(); m_maxY = 0;
 
-    const int MIN_DIST = 800;
-    const int MAX_DIST = 2000;
+    const int MIN_DIST = GESTURE_MIN_DIST;
+    const int MAX_DIST = GESTURE_MAX_DIST;
 
     // Phase 1: Background subtraction + bounding box
     for (int y = 0; y < frame.getHeight(); ++y)
@@ -471,10 +475,12 @@ void SimpleViewer::renderGestureOverlay()
     float duckRatio = (m_avgPixelCount > 0.0f)
                       ? (float)m_validPixelCount / m_avgPixelCount
                       : 0.0f;
-    snprintf(buf, sizeof(buf), "Px: %5d  EMA: %5d  duck_ratio: %.2f  [thresh 0.60]",
+    snprintf(buf, sizeof(buf), "Px: %5d  EMA: %5d  duck_ratio: %.2f  [thresh 0.60]  range %d-%dmm",
              m_validPixelCount,
              (int)m_avgPixelCount,
-             duckRatio);
+             duckRatio,
+             GESTURE_MIN_DIST,
+             GESTURE_MAX_DIST);
     glColor3f(1.0f, 1.0f, 0.0f);
     drawText(20, 57, buf);
 
