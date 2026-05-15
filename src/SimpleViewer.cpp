@@ -337,6 +337,9 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
     {
         m_gestureText = "NO USER";
         m_avgPixelCount = 0.0f;
+        m_framesJump = 0;
+        m_framesDuck = 0;
+        m_framesWalk = 0;
     }
 }
 
