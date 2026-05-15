@@ -11,10 +11,12 @@
 
 // Gesture detection depth range (mm).
 // Treadmill user sits approximately 800-1000 mm from the sensor.
-// 600 mm near-limit gives margin for arms reaching toward the camera;
+// 400 mm near-limit gives margin for arms reaching toward the camera;
 // 1200 mm far-limit excludes background while still covering the full body depth.
+// CLOSE_DIST separates forearms-pointing-at-camera (~400-650mm) from the torso (~800-1000mm).
 #define GESTURE_MIN_DIST   400
 #define GESTURE_MAX_DIST   1200
+#define GESTURE_CLOSE_DIST 650
 
 /**
  * @brief Helpers to ensure texture dimensions are powers of 2 (required for some OpenGL versions).
@@ -55,7 +57,6 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_framesDuck = 0;
     m_framesWalk = 0;
     m_avgPixelCount = 0.0f;
-    m_avgBotCount   = 0.0f;
     m_topHalfCount  = 0;
     m_botHalfCount  = 0;
     m_gestureText = "WAITING";
@@ -236,6 +237,7 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
 
     long long sumX = 0, sumY = 0;
     m_validPixelCount = 0;
+    m_closePixelCount = 0;
     m_minX = frame.getWidth();  m_maxX = 0;
     m_minY = frame.getHeight(); m_maxY = 0;
 
@@ -252,6 +254,7 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
             {
                 sumX += x; sumY += y;
                 m_validPixelCount++;
+                if (*pDepth <= GESTURE_CLOSE_DIST) m_closePixelCount++;
                 if (x < m_minX) m_minX = x;
                 if (x > m_maxX) m_maxX = x;
                 if (y < m_minY) m_minY = y;
@@ -292,31 +295,38 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         m_topHalfCount = topHalfCount;
         m_botHalfCount = botHalfCount;
 
-        // Update EMA of total pixel count and bot-half count (~20 frame window).
+        // Update EMA of total pixel count (~20 frame window).
         m_avgPixelCount = m_avgPixelCount * 0.95f + (float)m_validPixelCount * 0.05f;
-        m_avgBotCount   = m_avgBotCount   * 0.95f + (float)botHalfCount       * 0.05f;
 
-        // Phase 2a: JUMP — arms raised, pixel mass shifts to top half.
-        if (topHalfCount > botHalfCount * 0.30f)
+        // close_ratio: fraction of visible pixels that are in the forearm zone.
+        // WALKING: forearms pointing at camera → close_ratio HIGH (~0.15-0.40)
+        // JUMP:    arms raised to body distance → close_ratio LOW
+        // DUCK:    arms below frame → close_ratio LOW
+        float closeRatio = (m_validPixelCount > 0)
+                           ? (float)m_closePixelCount / (float)m_validPixelCount
+                           : 0.0f;
+
+        // Phase 2a: WALKING — significant forearm blob in the close zone.
+        if (closeRatio > 0.10f)
+        {
+            m_framesWalk++;
+            m_framesJump = 0;
+            m_framesDuck = 0;
+        }
+        // Phase 2b: JUMP — arms raised, close pixels gone, top half dominant.
+        else if (topHalfCount > botHalfCount * 0.30f)
         {
             m_framesJump++;
             m_framesDuck = 0;
             m_framesWalk = 0;
         }
-        // Phase 2b: DUCK — forearms/hands leave camera view; bot-half pixel count
-        // drops sharply below its EMA while top-half stays roughly the same.
-        // Require the EMA to be established (> 500) before using it.
-        else if (m_avgBotCount > 500.0f && (float)botHalfCount < m_avgBotCount * 0.50f)
+        // Phase 2c: DUCK — arms down and out of frame, close pixels gone,
+        // top half not dominant (just head/shoulders remain).
+        else
         {
             m_framesDuck++;
             m_framesJump = 0;
             m_framesWalk = 0;
-        }
-        else
-        {
-            m_framesWalk++;
-            m_framesJump = 0;
-            m_framesDuck = 0;
         }
 
         if (m_framesJump >= 5) m_gestureText = "JUMP";
@@ -327,7 +337,6 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
     {
         m_gestureText = "NO USER";
         m_avgPixelCount = 0.0f;
-        m_avgBotCount   = 0.0f; // Reset both EMAs so they re-calibrate when user returns
     }
 }
 
@@ -473,16 +482,15 @@ void SimpleViewer::renderGestureOverlay()
     glColor3f(0.0f, 1.0f, 0.0f);
     drawText(20, 32, ("ACTION: " + m_gestureText).c_str());
 
-    // Row 2: duck detection values (bot-half drop vs EMA)
-    float duckRatio = (m_avgBotCount > 0.0f)
-                      ? (float)m_botHalfCount / m_avgBotCount
-                      : 0.0f;
-    snprintf(buf, sizeof(buf), "Bot: %5d  EMA_bot: %5d  duck_ratio: %.2f  [thresh 0.50]  range %d-%dmm",
-             m_botHalfCount,
-             (int)m_avgBotCount,
-             duckRatio,
-             GESTURE_MIN_DIST,
-             GESTURE_MAX_DIST);
+    // Row 2: close-pixel ratio (key WALK signal)
+    float closeRatio = (m_validPixelCount > 0)
+                       ? (float)m_closePixelCount / (float)m_validPixelCount
+                       : 0.0f;
+    snprintf(buf, sizeof(buf), "Close: %5d  Total: %5d  close_ratio: %.2f  [walk thresh 0.10]  close<%dmm",
+             m_closePixelCount,
+             m_validPixelCount,
+             closeRatio,
+             GESTURE_CLOSE_DIST);
     glColor3f(1.0f, 1.0f, 0.0f);
     drawText(20, 57, buf);
 

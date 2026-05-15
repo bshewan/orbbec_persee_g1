@@ -137,15 +137,11 @@ private:
    float m_userCoMX;        ///< Horizontal Center of Mass of the detected user
    float m_userCoMY;        ///< Vertical Center of Mass of the detected user
    int   m_validPixelCount; ///< Count of pixels within the target depth range
+   int   m_closePixelCount; ///< Count of pixels within GESTURE_MIN_DIST..GESTURE_CLOSE_DIST (forearm zone)
    int   m_minX, m_maxX, m_minY, m_maxY; ///< Bounding box of the detected user
 
    /// Exponential moving average of valid pixel count.
    float m_avgPixelCount;
-
-   /// Exponential moving average of the bottom-half pixel count.
-   /// Used to detect DUCK: when forearms drop out of view, botHalf falls
-   /// well below this baseline while total pixel count stays roughly the same.
-   float m_avgBotCount;
 
    /// Last-frame top/bottom half pixel counts (stored for debug overlay).
    int m_topHalfCount;
