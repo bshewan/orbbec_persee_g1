@@ -222,7 +222,7 @@ void SimpleViewer::loadCOLORFrame(VideoFrameRef frame)
  *    - WALKING: arms bent 90°, forearms point toward camera at elbow height
  *      (bottom of frame) → more pixels in the LOWER half of the bounding box.
  *    - JUMP: arms raised above head → pixels shift to the UPPER half.
- *    Threshold: topHalfCount > botHalfCount × 1.8 → JUMP, else WALK.
+ *    Threshold: topHalfCount > botHalfCount × 0.30 → JUMP, else WALK.
  * 5. Debouncing: 5 consecutive frames required before a gesture fires.
  */
 void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
@@ -304,7 +304,7 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
             m_topHalfCount = topHalfCount;
             m_botHalfCount = botHalfCount;
 
-            if (topHalfCount > botHalfCount * 1.8f)
+            if (topHalfCount > botHalfCount * 0.30f)
             {
                 m_framesJump++;
                 m_framesDuck = 0;
@@ -488,7 +488,7 @@ void SimpleViewer::renderGestureOverlay()
     float jumpRatio = (m_botHalfCount > 0)
                       ? (float)m_topHalfCount / (float)m_botHalfCount
                       : 0.0f;
-    snprintf(buf, sizeof(buf), "Top: %5d  Bot: %5d  jump_ratio: %.2f  [thresh 1.80]",
+    snprintf(buf, sizeof(buf), "Top: %5d  Bot: %5d  jump_ratio: %.2f  [thresh 0.30]",
              m_topHalfCount,
              m_botHalfCount,
              jumpRatio);
