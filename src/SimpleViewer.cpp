@@ -43,6 +43,11 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_self = this;
     strncpy(m_strSampleName, strSampleName, ONI_MAX_STR);
     
+    // Pre-allocate BFS buffers for the maximum expected frame size (640x480)
+    // to avoid per-frame heap allocation inside analyzeGestures().
+    m_userMask.reserve(640 * 480);
+    m_bfsBuffer.reserve(640 * 480);
+
     // Initialize gesture tracking state
     m_framesJump = 0;
     m_framesDuck = 0;
@@ -192,125 +197,215 @@ void SimpleViewer::loadCOLORFrame(VideoFrameRef frame)
     }
 }
 
-/**
- * @brief Heuristic-based analysis to detect human gestures.
- * 
- * Logic:
- * 1. Filter: Isolate pixels between 800mm and 2000mm (the "user zone").
- * 2. Segmentation: Calculate the bounding box and Center of Mass (CoM).
- * 3. Vertical Zone Analysis: Divide the user's arm area (outer 25% width) into 
- *    Top, Mid, and Bottom vertical zones.
- * 4. Classification: 
- *    - Arms in Top Zone -> JUMP (High Arms)
- *    - Arms in Bottom Zone -> DUCK (Low Arms)
- *    - Arms in Mid Zone -> WALKING (Normal state)
- * 5. Debouncing: Requires 5 consecutive frames in a state to trigger an action.
- */
 void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
 {
     if (!frame.isValid() || frame.getVideoMode().getPixelFormat() != PIXEL_FORMAT_DEPTH_1MM)
+        return;
+
+    const int W       = frame.getWidth();
+    const int H       = frame.getHeight();
+    const DepthPixel* pData   = (const DepthPixel*)frame.getData();
+    const int         rowSize = frame.getStrideInBytes() / sizeof(DepthPixel);
+
+    const DepthPixel MIN_DIST = 800;
+    const DepthPixel MAX_DIST = 2000;
+
+    // --- Phase 1: Distance filter → binary foreground mask + rough CoM ---
+    // The rough CoM is only used as the BFS seed in Phase 2; it includes all
+    // foreground pixels (furniture, walls, etc.) and is intentionally imprecise.
+    m_userMask.assign(W * H, 0);
+    long long roughSumX = 0, roughSumY = 0;
+    int roughCount = 0;
+
+    for (int y = 0; y < H; ++y)
     {
+        for (int x = 0; x < W; ++x)
+        {
+            DepthPixel d = pData[y * rowSize + x];
+            if (d >= MIN_DIST && d <= MAX_DIST)
+            {
+                m_userMask[y * W + x] = 1;
+                roughSumX += x;
+                roughSumY += y;
+                roughCount++;
+            }
+        }
+    }
+
+    if (roughCount < 1000)
+    {
+        m_gestureText = "NO USER";
         return;
     }
 
-    const DepthPixel* pDepthRow = (const DepthPixel*)frame.getData();
-    int rowSize = frame.getStrideInBytes() / sizeof(DepthPixel);
+    // --- Phase 2: BFS flood fill to isolate the connected user blob ---
+    // Seeding from the rough CoM means we always grow the blob that is
+    // dominant in the scene — ignoring disconnected background clutter that
+    // also happens to fall in the 800-2000mm range.
+    int seedX = (int)(roughSumX / roughCount);
+    int seedY = (int)(roughSumY / roughCount);
 
-    long long sumX = 0;
-    long long sumY = 0;
-    m_validPixelCount = 0;
-    m_minX = frame.getWidth(); m_maxX = 0;
-    m_minY = frame.getHeight(); m_maxY = 0;
-
-    // Phase 1: Background subtraction (Distance filtering)
-    const int MIN_DIST = 800;
-    const int MAX_DIST = 2000;
-
-    for (int y = 0; y < frame.getHeight(); ++y)
+    // The CoM may land on a 0-pixel (e.g. in a concave region). Spiral outward
+    // on the border of an expanding square until a foreground pixel is found.
+    if (!m_userMask[seedY * W + seedX])
     {
-        const DepthPixel* pDepth = pDepthRow;
-        for (int x = 0; x < frame.getWidth(); ++x, ++pDepth)
+        bool found = false;
+        for (int r = 1; r < 30 && !found; ++r)
         {
-            if (*pDepth >= MIN_DIST && *pDepth <= MAX_DIST)
+            for (int dy = -r; dy <= r && !found; ++dy)
             {
-                sumX += x;
-                sumY += y;
-                m_validPixelCount++;
-
-                if (x < m_minX) m_minX = x;
-                if (x > m_maxX) m_maxX = x;
-                if (y < m_minY) m_minY = y;
-                if (y > m_maxY) m_maxY = y;
-            }
-        }
-        pDepthRow += rowSize;
-    }
-
-    // Phase 2: Analyze vertical zones if enough pixels represent a person
-    if (m_validPixelCount > 1000) 
-    {
-        m_userCoMX = (float)sumX / m_validPixelCount;
-        m_userCoMY = (float)sumY / m_validPixelCount;
-
-        int userWidth = m_maxX - m_minX;
-        int userHeight = m_maxY - m_minY;
-        
-        if (userHeight == 0 || userWidth == 0) return;
-
-        int topZoneCount = 0;
-        int midZoneCount = 0;
-        int botZoneCount = 0;
-
-        pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
-        for (int y = m_minY; y <= m_maxY; ++y)
-        {
-            float heightPercent = (float)(y - m_minY) / userHeight;
-            
-            for (int x = m_minX; x <= m_maxX; ++x)
-            {
-                const DepthPixel p = pDepthRow[x];
-                if (p >= MIN_DIST && p <= MAX_DIST)
+                for (int dx = -r; dx <= r && !found; ++dx)
                 {
-                    // Look only at the sides of the person (the arms)
-                    if (x < m_minX + (userWidth * 0.25) || x > m_maxX - (userWidth * 0.25))
+                    if (abs(dx) != r && abs(dy) != r) continue; // only the border ring
+                    int nx = seedX + dx, ny = seedY + dy;
+                    if (nx >= 0 && nx < W && ny >= 0 && ny < H && m_userMask[ny * W + nx])
                     {
-                        if (heightPercent < 0.3f) topZoneCount++;
-                        else if (heightPercent < 0.7f) midZoneCount++;
-                        else botZoneCount++;
+                        seedX = nx; seedY = ny; found = true;
                     }
                 }
             }
-            pDepthRow += rowSize;
         }
+        if (!found) { m_gestureText = "NO USER"; return; }
+    }
 
-        // Phase 3: Classification and Debouncing
-        if (topZoneCount > midZoneCount && topZoneCount > botZoneCount)
-        {
-            m_framesJump++;
-            m_framesDuck = 0;
-            m_framesWalk = 0;
-        }
-        else if (botZoneCount > midZoneCount && botZoneCount > topZoneCount)
-        {
-            m_framesDuck++;
-            m_framesJump = 0;
-            m_framesWalk = 0;
-        }
-        else
-        {
-            m_framesWalk++;
-            m_framesJump = 0;
-            m_framesDuck = 0;
-        }
+    // BFS using m_bfsBuffer as both the queue and the final component list.
+    // Processing via a head index avoids the overhead of std::queue.
+    m_bfsBuffer.clear();
+    int seedIdx = seedY * W + seedX;
+    m_userMask[seedIdx] = 2; // 2 = visited
+    m_bfsBuffer.push_back(seedIdx);
 
-        if (m_framesJump == 5) m_gestureText = "JUMP";
-        else if (m_framesDuck == 5) m_gestureText = "DUCK";
-        else if (m_framesWalk == 5) m_gestureText = "WALKING";
+    static const int dx4[] = {-1,  1,  0, 0};
+    static const int dy4[] = { 0,  0, -1, 1};
+
+    for (int head = 0; head < (int)m_bfsBuffer.size(); ++head)
+    {
+        int idx = m_bfsBuffer[head];
+        int px  = idx % W, py = idx / W;
+        for (int i = 0; i < 4; ++i)
+        {
+            int nx = px + dx4[i], ny = py + dy4[i];
+            if (nx >= 0 && nx < W && ny >= 0 && ny < H)
+            {
+                int nidx = ny * W + nx;
+                if (m_userMask[nidx] == 1)
+                {
+                    m_userMask[nidx] = 2;
+                    m_bfsBuffer.push_back(nidx);
+                }
+            }
+        }
+    }
+
+    m_validPixelCount = (int)m_bfsBuffer.size();
+    if (m_validPixelCount < 1000)
+    {
+        m_gestureText = "NO USER";
+        return;
+    }
+
+    // --- Phase 3: Bounding box, CoM, and extremity pixels from the user blob ---
+    m_minX = W; m_maxX = 0; m_minY = H; m_maxY = 0;
+    long long sumX = 0, sumY = 0;
+
+    for (int idx : m_bfsBuffer)
+    {
+        int px = idx % W, py = idx / W;
+        if (px < m_minX) m_minX = px;
+        if (px > m_maxX) m_maxX = px;
+        if (py < m_minY) m_minY = py;
+        if (py > m_maxY) m_maxY = py;
+        sumX += px;
+        sumY += py;
+    }
+
+    m_userCoMX = (float)(sumX / m_validPixelCount);
+    m_userCoMY = (float)(sumY / m_validPixelCount);
+
+    int userHeight = m_maxY - m_minY;
+    if (userHeight == 0) return;
+
+    // Head  = topmost pixel in the blob (smallest screen Y = highest in real world).
+    // Hands = leftmost and rightmost pixels in the upper 60% of the bounding box.
+    //         Limiting to the upper body prevents feet/knees from being mistaken for hands.
+    int armSearchBottom = m_minY + (int)(userHeight * 0.60f);
+
+    int headX = (int)m_userCoMX, headY = H;
+    int leftHandX  = W,  leftHandY  = -1;
+    int rightHandX = -1, rightHandY = -1;
+
+    for (int idx : m_bfsBuffer)
+    {
+        int px = idx % W, py = idx / W;
+        if (py < headY) { headY = py; headX = px; }
+        if (py <= armSearchBottom)
+        {
+            if (px < leftHandX)  { leftHandX  = px; leftHandY  = py; }
+            if (px > rightHandX) { rightHandX = px; rightHandY = py; }
+        }
+    }
+
+    if (leftHandY < 0 || rightHandY < 0) return; // degenerate blob
+
+    // --- Phase 4: Convert key points to world coordinates (mm) ---
+    // convertDepthToWorld maps (pixelX, pixelY, depthZ) → world(X, Y, Z) where
+    // Y increases upward. The head therefore has the largest world Y value.
+    auto toWorld = [&](int px, int py, float& wx, float& wy, float& wz)
+    {
+        DepthPixel d = pData[py * rowSize + px];
+        if (d == 0) d = MIN_DIST; // guard against invalid (zero) depth pixels
+        openni::CoordinateConverter::convertDepthToWorld(m_depthStream, px, py, d, &wx, &wy, &wz);
+    };
+
+    float headWX,  headWY,  headWZ;
+    float leftWX,  leftWY,  leftWZ;
+    float rightWX, rightWY, rightWZ;
+    float comWX,   comWY,   comWZ;
+
+    toWorld(headX,           headY,           headWX,  headWY,  headWZ);
+    toWorld(leftHandX,       leftHandY,       leftWX,  leftWY,  leftWZ);
+    toWorld(rightHandX,      rightHandY,      rightWX, rightWY, rightWZ);
+    toWorld((int)m_userCoMX, (int)m_userCoMY, comWX,   comWY,   comWZ);
+
+    // --- Phase 5: Body-proportional gesture classification ---
+    // headToCoM is the vertical span from the head down to the body's CoM (~belly
+    // button). This scales with both the user's size and their distance from the
+    // camera, making every threshold below naturally distance-invariant.
+    float headToCoM = headWY - comWY; // mm, positive (head is above CoM in world Y)
+    if (headToCoM <= 0) return;       // degenerate: camera upside-down or bad data
+
+    // Shoulder reference: ~40% of head-to-CoM distance below the head.
+    // Arms raised above this → JUMP.
+    float shoulderThreshold = headWY - headToCoM * 0.40f;
+
+    // Hip reference: ~140% of head-to-CoM distance below the head (below CoM).
+    // Arms lowered below this → DUCK.
+    float hipThreshold = headWY - headToCoM * 1.40f;
+
+    float avgHandY = (leftWY + rightWY) * 0.5f;
+
+    if (avgHandY > shoulderThreshold)
+    {
+        m_framesJump++;
+        m_framesDuck = 0;
+        m_framesWalk = 0;
+    }
+    else if (avgHandY < hipThreshold)
+    {
+        m_framesDuck++;
+        m_framesJump = 0;
+        m_framesWalk = 0;
     }
     else
     {
-        m_gestureText = "NO USER";
+        m_framesWalk++;
+        m_framesJump = 0;
+        m_framesDuck = 0;
     }
+
+    if (m_framesJump >= 5) m_gestureText = "JUMP";
+    else if (m_framesDuck >= 5) m_gestureText = "DUCK";
+    else if (m_framesWalk >= 5) m_gestureText = "WALKING";
 }
 
 

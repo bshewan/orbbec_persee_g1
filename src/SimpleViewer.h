@@ -13,6 +13,7 @@
 #include "OpenNI.h"
 #include "cmd.h"
 #include <iostream>
+#include <vector>
 
 #pragma once
 
@@ -62,8 +63,20 @@ public:
     void loadCOLORFrame(VideoFrameRef frame);	
 
     /**
-     * @brief Main logic for detecting gestures (Jump, Duck, Walk) using Vertical Zone Analysis.
-     * It isolates the user from the background and analyzes arm placement.
+     * @brief Detects gestures (Jump, Duck, Walk) using connected-component segmentation
+     *        and world-space coordinate analysis.
+     *
+     * Algorithm:
+     * 1. Distance filter: Build a binary mask of pixels in the 800-2000mm user zone.
+     * 2. BFS flood fill: Starting from the rough CoM of the mask, isolate the connected
+     *    foreground blob belonging to the user, discarding background clutter.
+     * 3. Extremity extraction: Locate the head (topmost pixel) and hand candidates
+     *    (lateral extremes in the upper 60% of the bounding box).
+     * 4. World-space conversion: Use CoordinateConverter::convertDepthToWorld() to get
+     *    real-world mm coordinates, making detection distance-invariant.
+     * 5. Classification: Compare average hand height to body-proportional thresholds
+     *    derived from the head-to-CoM vertical distance.
+     * 6. Debouncing: Requires 5 consecutive frames to commit a gesture.
      */
     void analyzeGestures(const openni::VideoFrameRef& frame);
 
@@ -134,10 +147,14 @@ private:
     float			m_pDepthHist[MAX_DEPTH]; ///< Pre-calculated depth histogram
 
    // --- Gesture Tracking Members ---
-   float m_userCoMX;        ///< Horizontal Center of Mass of the detected user
-   float m_userCoMY;        ///< Vertical Center of Mass of the detected user
-   int   m_validPixelCount; ///< Count of pixels within the target depth range
+   float m_userCoMX;        ///< Horizontal Center of Mass of the detected user (pixel space)
+   float m_userCoMY;        ///< Vertical Center of Mass of the detected user (pixel space)
+   int   m_validPixelCount; ///< Pixel count of the BFS-isolated user blob
    int   m_minX, m_maxX, m_minY, m_maxY; ///< Bounding box of the detected user
+
+   // --- BFS Segmentation Buffers (pre-allocated to avoid per-frame heap churn) ---
+   std::vector<uint8_t> m_userMask;  ///< Per-pixel foreground mask: 0=bg, 1=fg, 2=visited
+   std::vector<int>     m_bfsBuffer; ///< BFS frontier / result component (pixel indices)
 
    // --- State Debouncing (Frame counters) ---
    int   m_framesJump;
