@@ -9,6 +9,15 @@
 #define GL_WIN_SIZE_Y      600
 #define TEXTURE_SIZE       512
 
+// Gesture detection depth range (mm).
+// Treadmill user sits approximately 800-1000 mm from the sensor.
+// 400 mm near-limit gives margin for arms reaching toward the camera;
+// 1200 mm far-limit excludes background while still covering the full body depth.
+// CLOSE_DIST separates forearms-pointing-at-camera (~400-650mm) from the torso (~800-1000mm).
+#define GESTURE_MIN_DIST   400
+#define GESTURE_MAX_DIST   1200
+#define GESTURE_CLOSE_DIST 650
+
 /**
  * @brief Helpers to ensure texture dimensions are powers of 2 (required for some OpenGL versions).
  */
@@ -37,7 +46,7 @@ void SimpleViewer::glutKeyboard(unsigned char key, int x, int y)
     SimpleViewer::m_self->onKey(key, x, y);
 }
 
-SimpleViewer::SimpleViewer(const char* strSampleName, openni::Device &device, openni::VideoStream& color, openni::VideoStream& depth, openni::VideoStream& ir) :
+SimpleViewer::SimpleViewer(const char* strSampleName, openni::Device &device, openni::VideoStream& color, openni::VideoStream& ir, openni::VideoStream& depth) :
 m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_pTexMap(NULL), m_streamType(STREAM_TYPE_UNKNOWN), m_prevStreamType(STREAM_TYPE_UNKNOWN)
 {
     m_self = this;
@@ -52,6 +61,9 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_framesJump = 0;
     m_framesDuck = 0;
     m_framesWalk = 0;
+    m_avgPixelCount = 0.0f;
+    m_topHalfCount  = 0;
+    m_botHalfCount  = 0;
     m_gestureText = "WAITING";
 }
 
@@ -141,8 +153,10 @@ void SimpleViewer::loadIRFrame(VideoFrameRef frame)
 }
 
 /**
- * @brief Converts a 16-bit Depth frame to 8-bit Grayscale using a pre-calculated histogram.
- * This ensures that depth variations are visually distinguishable across the entire range.
+ * @brief Converts a 16-bit Depth frame to 8-bit Grayscale, rendering only
+ * pixels within the gesture detection range (800–2000 mm).
+ * Everything outside that range is rendered black so the display matches
+ * exactly what the gesture algorithm evaluates.
  */
 void SimpleViewer::loadDepthFrame(VideoFrameRef frame)
 {
@@ -159,13 +173,14 @@ void SimpleViewer::loadDepthFrame(VideoFrameRef frame)
 
         for (int x = 0; x < frame.getWidth(); ++x, ++pDepth, ++pTex)
         {
-            if (*pDepth != 0)
+            if (*pDepth >= GESTURE_MIN_DIST && *pDepth <= GESTURE_MAX_DIST)
             {
                 int nHistValue = (int)m_pDepthHist[*pDepth];
                 pTex->r = nHistValue;
                 pTex->g = nHistValue;
                 pTex->b = nHistValue;
             }
+            // Pixels outside the gesture range stay black (zeroed by memset in loadFrameToTexture)
         }
 
         pDepthRow += rowSize;
@@ -440,8 +455,10 @@ void SimpleViewer::switchStream()
         VideoMode videomode = active->getVideoMode();
         videomode.setResolution(640, 480);
         
-        if (m_streamType == STREAM_TYPE_IR_VGA) 
+        if (m_streamType == STREAM_TYPE_IR_VGA)
             videomode.setPixelFormat(openni::PIXEL_FORMAT_GRAY16);
+        else if (m_streamType == STREAM_TYPE_DEPTH_VGA)
+            videomode.setPixelFormat(openni::PIXEL_FORMAT_DEPTH_1_MM);
         
         active->setVideoMode(videomode);
         active->start();
@@ -522,24 +539,54 @@ void SimpleViewer::drawText(int x, int y, const char* text)
 }
 
 /**
- * @brief Renders the "ACTION: [GESTURE]" HUD in the top-left corner.
+ * @brief Renders the gesture HUD and live detection values for tuning.
+ *
+ * Layout (top-left):
+ *   ACTION: <gesture>
+ *   Bot: <bot>  EMA_bot: <avg_bot>  duck_ratio: <ratio>  [threshold 0.50]
+ *   Top: <top>  Bot: <bot>  ratio: <jump_ratio>  [threshold 1.80]
  */
 void SimpleViewer::renderGestureOverlay()
 {
     glDisable(GL_TEXTURE_2D);
-    
-    // Background box
+
+    // --- Background box ---
     glColor4f(0.0f, 0.0f, 0.0f, 0.7f);
     glBegin(GL_QUADS);
     glVertex2i(10, 10);
-    glVertex2i(250, 10);
-    glVertex2i(250, 50);
-    glVertex2i(10, 50);
+    glVertex2i(460, 10);
+    glVertex2i(460, 100);
+    glVertex2i(10, 100);
     glEnd();
 
-    // Gesture text
-    glColor3f(0.0f, 1.0f, 0.0f); 
-    drawText(20, 35, ("ACTION: " + m_gestureText).c_str());
+    char buf[128];
+
+    // Row 1: gesture label
+    glColor3f(0.0f, 1.0f, 0.0f);
+    drawText(20, 32, ("ACTION: " + m_gestureText).c_str());
+
+    // Row 2: close-pixel ratio (key WALK signal)
+    float closeRatio = (m_validPixelCount > 0)
+                       ? (float)m_closePixelCount / (float)m_validPixelCount
+                       : 0.0f;
+    snprintf(buf, sizeof(buf), "Close: %5d  Total: %5d  close_ratio: %.2f  [walk thresh 0.10]  close<%dmm",
+             m_closePixelCount,
+             m_validPixelCount,
+             closeRatio,
+             GESTURE_CLOSE_DIST);
+    glColor3f(1.0f, 1.0f, 0.0f);
+    drawText(20, 57, buf);
+
+    // Row 3: jump/walk detection values
+    float jumpRatio = (m_botHalfCount > 0)
+                      ? (float)m_topHalfCount / (float)m_botHalfCount
+                      : 0.0f;
+    snprintf(buf, sizeof(buf), "Top: %5d  Bot: %5d  jump_ratio: %.2f  [thresh 0.30]",
+             m_topHalfCount,
+             m_botHalfCount,
+             jumpRatio);
+    glColor3f(0.4f, 0.8f, 1.0f);
+    drawText(20, 82, buf);
 
     glEnable(GL_TEXTURE_2D);
 }
@@ -719,7 +766,7 @@ void SimpleViewer::calculateHistogram(float* pHistogram, int histogramSize, cons
     {
         for (int i=1; i<histogramSize; i++)
         {
-            pHistogram[i] = (256 * (1.0f - (pHistogram[i] / nNumberOfPoints)));
+            pHistogram[i] = (255 * (1.0f - (pHistogram[i] / nNumberOfPoints)));
         }
     }
 }
