@@ -140,9 +140,12 @@ private:
    int   m_minX, m_maxX, m_minY, m_maxY; ///< Bounding box of the detected user
 
    /// Exponential moving average of valid pixel count.
-   /// Used to detect DUCK: when hands drop out of camera view, pixel count
-   /// falls well below this baseline.
    float m_avgPixelCount;
+
+   /// Exponential moving average of the bottom-half pixel count.
+   /// Used to detect DUCK: when forearms drop out of view, botHalf falls
+   /// well below this baseline while total pixel count stays roughly the same.
+   float m_avgBotCount;
 
    /// Last-frame top/bottom half pixel counts (stored for debug overlay).
    int m_topHalfCount;

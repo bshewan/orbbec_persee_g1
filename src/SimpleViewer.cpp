@@ -55,6 +55,7 @@ m_device(device), m_colorStream(color), m_irStream(ir), m_depthStream(depth), m_
     m_framesDuck = 0;
     m_framesWalk = 0;
     m_avgPixelCount = 0.0f;
+    m_avgBotCount   = 0.0f;
     m_topHalfCount  = 0;
     m_botHalfCount  = 0;
     m_gestureText = "WAITING";
@@ -269,12 +270,43 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         int userHeight = m_maxY - m_minY;
         if (userHeight == 0 || userWidth == 0) return;
 
-        // Update EMA pixel count (converges over ~20 frames).
-        m_avgPixelCount = m_avgPixelCount * 0.95f + (float)m_validPixelCount * 0.05f;
+        // Phase 2: top/bottom half split (needed for both DUCK and JUMP).
+        int topHalfCount = 0;
+        int botHalfCount = 0;
+        pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
+        for (int y = m_minY; y <= m_maxY; ++y)
+        {
+            float heightPercent = (float)(y - m_minY) / userHeight;
+            for (int x = m_minX; x <= m_maxX; ++x)
+            {
+                const DepthPixel p = pDepthRow[x];
+                if (p >= MIN_DIST && p <= MAX_DIST)
+                {
+                    if (heightPercent < 0.50f) topHalfCount++;
+                    else                       botHalfCount++;
+                }
+            }
+            pDepthRow += rowSize;
+        }
 
-        // Phase 2a: DUCK — forearms/hands have dropped below the camera view.
-        // Require the EMA to be established (> 5000) before using it.
-        if (m_avgPixelCount > 5000.0f && (float)m_validPixelCount < m_avgPixelCount * 0.60f)
+        m_topHalfCount = topHalfCount;
+        m_botHalfCount = botHalfCount;
+
+        // Update EMA of total pixel count and bot-half count (~20 frame window).
+        m_avgPixelCount = m_avgPixelCount * 0.95f + (float)m_validPixelCount * 0.05f;
+        m_avgBotCount   = m_avgBotCount   * 0.95f + (float)botHalfCount       * 0.05f;
+
+        // Phase 2a: JUMP — arms raised, pixel mass shifts to top half.
+        if (topHalfCount > botHalfCount * 0.30f)
+        {
+            m_framesJump++;
+            m_framesDuck = 0;
+            m_framesWalk = 0;
+        }
+        // Phase 2b: DUCK — forearms/hands leave camera view; bot-half pixel count
+        // drops sharply below its EMA while top-half stays roughly the same.
+        // Require the EMA to be established (> 500) before using it.
+        else if (m_avgBotCount > 500.0f && (float)botHalfCount < m_avgBotCount * 0.50f)
         {
             m_framesDuck++;
             m_framesJump = 0;
@@ -282,40 +314,9 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
         }
         else
         {
-            // Phase 2b: JUMP vs WALK — compare top-half vs bottom-half density.
-            int topHalfCount = 0;
-            int botHalfCount = 0;
-            pDepthRow = (const DepthPixel*)frame.getData() + (m_minY * rowSize);
-            for (int y = m_minY; y <= m_maxY; ++y)
-            {
-                float heightPercent = (float)(y - m_minY) / userHeight;
-                for (int x = m_minX; x <= m_maxX; ++x)
-                {
-                    const DepthPixel p = pDepthRow[x];
-                    if (p >= MIN_DIST && p <= MAX_DIST)
-                    {
-                        if (heightPercent < 0.50f) topHalfCount++;
-                        else                       botHalfCount++;
-                    }
-                }
-                pDepthRow += rowSize;
-            }
-
-            m_topHalfCount = topHalfCount;
-            m_botHalfCount = botHalfCount;
-
-            if (topHalfCount > botHalfCount * 0.30f)
-            {
-                m_framesJump++;
-                m_framesDuck = 0;
-                m_framesWalk = 0;
-            }
-            else
-            {
-                m_framesWalk++;
-                m_framesJump = 0;
-                m_framesDuck = 0;
-            }
+            m_framesWalk++;
+            m_framesJump = 0;
+            m_framesDuck = 0;
         }
 
         if (m_framesJump >= 5) m_gestureText = "JUMP";
@@ -325,7 +326,8 @@ void SimpleViewer::analyzeGestures(const openni::VideoFrameRef& frame)
     else
     {
         m_gestureText = "NO USER";
-        m_avgPixelCount = 0.0f; // Reset EMA so it re-calibrates when user returns
+        m_avgPixelCount = 0.0f;
+        m_avgBotCount   = 0.0f; // Reset both EMAs so they re-calibrate when user returns
     }
 }
 
@@ -449,7 +451,7 @@ void SimpleViewer::drawText(int x, int y, const char* text)
  *
  * Layout (top-left):
  *   ACTION: <gesture>
- *   Px: <current>  EMA: <avg>  ratio: <duck_ratio>  [threshold 0.60]
+ *   Bot: <bot>  EMA_bot: <avg_bot>  duck_ratio: <ratio>  [threshold 0.50]
  *   Top: <top>  Bot: <bot>  ratio: <jump_ratio>  [threshold 1.80]
  */
 void SimpleViewer::renderGestureOverlay()
@@ -471,13 +473,13 @@ void SimpleViewer::renderGestureOverlay()
     glColor3f(0.0f, 1.0f, 0.0f);
     drawText(20, 32, ("ACTION: " + m_gestureText).c_str());
 
-    // Row 2: duck detection values
-    float duckRatio = (m_avgPixelCount > 0.0f)
-                      ? (float)m_validPixelCount / m_avgPixelCount
+    // Row 2: duck detection values (bot-half drop vs EMA)
+    float duckRatio = (m_avgBotCount > 0.0f)
+                      ? (float)m_botHalfCount / m_avgBotCount
                       : 0.0f;
-    snprintf(buf, sizeof(buf), "Px: %5d  EMA: %5d  duck_ratio: %.2f  [thresh 0.60]  range %d-%dmm",
-             m_validPixelCount,
-             (int)m_avgPixelCount,
+    snprintf(buf, sizeof(buf), "Bot: %5d  EMA_bot: %5d  duck_ratio: %.2f  [thresh 0.50]  range %d-%dmm",
+             m_botHalfCount,
+             (int)m_avgBotCount,
              duckRatio,
              GESTURE_MIN_DIST,
              GESTURE_MAX_DIST);
