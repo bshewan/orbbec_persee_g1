@@ -139,12 +139,17 @@ void SimpleViewer::loadIRFrame(VideoFrameRef frame)
 }
 
 /**
- * @brief Converts a 16-bit Depth frame to 8-bit Grayscale using a pre-calculated histogram.
- * This ensures that depth variations are visually distinguishable across the entire range.
+ * @brief Converts a 16-bit Depth frame to 8-bit Grayscale, rendering only
+ * pixels within the gesture detection range (800–2000 mm).
+ * Everything outside that range is rendered black so the display matches
+ * exactly what the gesture algorithm evaluates.
  */
 void SimpleViewer::loadDepthFrame(VideoFrameRef frame)
 {
     calculateHistogram(m_pDepthHist, MAX_DEPTH, frame);
+
+    const int GESTURE_MIN_DIST = 800;
+    const int GESTURE_MAX_DIST = 2000;
 
     const DepthPixel* pDepthRow = (const DepthPixel*)frame.getData();
     RGB888Pixel* pTexRow = m_pTexMap + frame.getCropOriginY() * m_nTexMapX;
@@ -157,13 +162,14 @@ void SimpleViewer::loadDepthFrame(VideoFrameRef frame)
 
         for (int x = 0; x < frame.getWidth(); ++x, ++pDepth, ++pTex)
         {
-            if (*pDepth != 0)
+            if (*pDepth >= GESTURE_MIN_DIST && *pDepth <= GESTURE_MAX_DIST)
             {
                 int nHistValue = (int)m_pDepthHist[*pDepth];
                 pTex->r = nHistValue;
                 pTex->g = nHistValue;
                 pTex->b = nHistValue;
             }
+            // Pixels outside the gesture range stay black (zeroed by memset in loadFrameToTexture)
         }
 
         pDepthRow += rowSize;
